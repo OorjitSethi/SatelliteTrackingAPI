@@ -95,7 +95,7 @@ Generates a list of positions over a time duration.
 ```python
 import requests
 
-url = "https://your-api.onrender.com/predict"
+url = "https://satellitetrackingapi.onrender.com/"
 data = {
     "initial_time_utc": "2025-03-03 07:59:04",
     "initial_position": [-33555551.4377, -2752187.075, 5223462.1788],
@@ -111,7 +111,7 @@ print(response.json())
 
 ### **2. Using JavaScript**
 ```javascript
-fetch("https://your-api.onrender.com/predict", {
+fetch("https://satellitetrackingapi.onrender.com/", {
     method: "POST",
     headers: {
         "Content-Type": "application/json"
@@ -132,7 +132,7 @@ fetch("https://your-api.onrender.com/predict", {
 
 ## **API Documentation**
 For full details, visit the API’s home page at:  
-`https://your-api.onrender.com/`
+`https://satellitetrackingapi.onrender.com/`
 
 ---
 
