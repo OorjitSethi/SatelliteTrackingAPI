@@ -1,10 +1,13 @@
-from flask import Flask, request, jsonify, render_template_string
-from datetime import datetime, timedelta
-import numpy as np
-import math
+# Import required libraries
+from flask import Flask, request, jsonify, render_template_string  # Flask web framework
+from datetime import datetime, timedelta  # For handling dates and times
+import numpy as np  # For numerical computations
+import math  # For mathematical operations
 
+# Initialize Flask application
 app = Flask(__name__)
 
+# Define route for predicting satellite position
 @app.route('/predict', methods=['POST'])
 def predict():
     """
@@ -26,6 +29,7 @@ def predict():
     - final_time_utc: Final time in UTC format
     """
     try:
+        # Get JSON data from request
         data = request.json
         
         # Extract required parameters from request
@@ -34,18 +38,19 @@ def predict():
         velocity = data.get('velocity')
         final_time_utc = data.get('final_time_utc')
         
-        # Optional parameters with defaults
+        # Extract optional parameters with default values
         a_earth = data.get('a_earth', 6378137.0)
         b_earth = data.get('b_earth', 6356752.3142)
         
-        # Validate inputs
+        # Validate that all required parameters are present
         if not all([initial_time_utc, initial_position, velocity, final_time_utc]):
             return jsonify({"error": "Missing required parameters"}), 400
             
+        # Validate that position and velocity are 3D vectors
         if len(initial_position) != 3 or len(velocity) != 3:
             return jsonify({"error": "Position and velocity must be 3D vectors"}), 400
         
-        # Calculate position
+        # Calculate final satellite position using orbital mechanics
         final_position = predict_satellite_position(
             initial_time_utc,
             initial_position, 
@@ -55,7 +60,7 @@ def predict():
             b_earth
         )
         
-        # Return as JSON
+        # Format and return results as JSON
         return jsonify({
             "final_position": {
                 "x": float(final_position[0]),
@@ -67,6 +72,7 @@ def predict():
         })
         
     except Exception as e:
+        # Return error message if anything goes wrong
         return jsonify({"error": str(e)}), 500
 
 def predict_satellite_position(initial_time_utc, initial_position, velocity, final_time_utc, 
@@ -85,39 +91,47 @@ def predict_satellite_position(initial_time_utc, initial_position, velocity, fin
     Returns:
         tuple: Final position as 3D vector (x, y, z) in meters
     """
+    # Convert time strings to datetime objects and calculate time difference
     initial_time = datetime.strptime(initial_time_utc, "%Y-%m-%d %H:%M:%S")
     final_time = datetime.strptime(final_time_utc, "%Y-%m-%d %H:%M:%S")
     time_difference = (final_time - initial_time).total_seconds()
     
+    # Convert inputs to numpy arrays for vector calculations
     initial_position = np.array(initial_position, dtype=float)
     velocity = np.array(velocity, dtype=float)
     
+    # Calculate magnitude of position and velocity vectors
     r = np.linalg.norm(initial_position)
     v = np.linalg.norm(velocity)
     
+    # Calculate angular momentum vector
     h = np.cross(initial_position, velocity)
     
+    # Standard gravitational parameter for Earth (m³/s²)
     mu = 3.986004418e14
+    
+    # Calculate eccentricity vector and magnitude
     e_vec = np.cross(velocity, h) / mu - initial_position / r
     e = np.linalg.norm(e_vec)
     
-    # Check if e is too close to 1 to avoid numerical issues
+    # Avoid numerical issues when eccentricity is close to 1
     if abs(e - 1.0) < 1e-10:
         e = 0.999999
     
     # Calculate semi-major axis
     a = r / (1 - e * np.dot(e_vec, initial_position) / (e * r))
     
-    # Check if semi-major axis is valid
+    # For hyperbolic/parabolic orbits, use simple propagation
     if a <= 0:
-        # Use simple propagation for hyperbolic/parabolic orbits
         final_position = initial_position + velocity * time_difference
         return tuple(final_position)
     
+    # Calculate mean motion and mean anomaly
     n = np.sqrt(mu / (a ** 3))
     M = n * time_difference
     
-    # Solve Kepler's equation with better convergence handling
+    # Solve Kepler's equation iteratively
+    # Different methods for low vs high eccentricity
     if e < 0.8:
         # For low eccentricity, use standard iteration
         E = M
@@ -127,7 +141,7 @@ def predict_satellite_position(initial_time_utc, initial_position, velocity, fin
             if abs(delta) < 1e-10:
                 break
     else:
-        # For high eccentricity, use a different initial guess
+        # For high eccentricity, use different initial guess
         E = math.pi if M > math.pi else M
         for i in range(20):
             delta = (E - e * np.sin(E) - M) / (1 - e * np.cos(E))
@@ -135,7 +149,7 @@ def predict_satellite_position(initial_time_utc, initial_position, velocity, fin
             if abs(delta) < 1e-10:
                 break
     
-    # Calculate true anomaly
+    # Calculate true anomaly from eccentric anomaly
     cos_E = np.cos(E)
     sin_E = np.sin(E)
     cos_nu = (cos_E - e) / (1 - e * cos_E)
@@ -145,55 +159,58 @@ def predict_satellite_position(initial_time_utc, initial_position, velocity, fin
     # Calculate new radius
     r_new = a * (1 - e * cos_E)
     
-    # Calculate position in orbital plane
+    # Calculate semi-parameter
     p = a * (1 - e*e)
     
-    # Ensure h is not zero to avoid division by zero
+    # Check for zero angular momentum
     h_mag = np.linalg.norm(h)
     if h_mag < 1e-10:
-        # If angular momentum is too small, use simple propagation
+        # If angular momentum too small, use simple propagation
         final_position = initial_position + velocity * time_difference
         return tuple(final_position)
     
-    # Unit vectors
+    # Calculate unit vectors for coordinate transformation
     h_unit = h / h_mag
     e_unit = e_vec / max(np.linalg.norm(e_vec), 1e-10)
     n_unit = np.cross([0, 0, 1], h_unit)
     n_mag = np.linalg.norm(n_unit)
     
+    # Handle equatorial orbits specially
     if n_mag < 1e-10:
-        # If orbit is equatorial, use a different reference
         n_unit = np.array([1, 0, 0])
     else:
         n_unit = n_unit / n_mag
     
-    # Third unit vector to complete the orthogonal set
+    # Complete orthogonal coordinate system
     m_unit = np.cross(h_unit, n_unit)
     
-    # Position in orbital plane
+    # Calculate position in orbital plane
     x_orb = r_new * cos_nu
     y_orb = r_new * sin_nu
     
-    # Transform to inertial frame
+    # Transform position to inertial frame
     pos_vec = x_orb * n_unit + y_orb * m_unit
     
-    # Apply J2 perturbation
+    # Calculate J2 perturbation effects
     f = (a_earth - b_earth) / a_earth
     J2 = 1.08263e-3
     
+    # Calculate perturbation vector components
     perturbation = np.zeros(3)
     perturbation[0] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (1 - 5*(pos_vec[2]/r_new)**2) * pos_vec[0]/r_new
     perturbation[1] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (1 - 5*(pos_vec[2]/r_new)**2) * pos_vec[1]/r_new
     perturbation[2] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (3 - 5*(pos_vec[2]/r_new)**2) * pos_vec[2]/r_new
     
-    # For very long time differences, fall back to simpler model
+    # For very long time periods, use simpler model
     if abs(time_difference) > 30 * 24 * 3600:  # More than 30 days
         final_position = initial_position + velocity * time_difference
     else:
+        # Add perturbation effects to position
         final_position = pos_vec + 0.5 * perturbation * time_difference**2
     
     return tuple(final_position)
 
+# Define route for tracking satellite over time
 @app.route('/track', methods=['POST'])
 def track_over_time():
     """
@@ -217,6 +234,7 @@ def track_over_time():
     - interval_hours: Time interval between points
     """
     try:
+        # Get JSON data from request
         data = request.json
         
         # Extract required parameters
@@ -226,22 +244,22 @@ def track_over_time():
         duration_days = data.get('duration_days', 30)
         interval_hours = data.get('interval_hours', 6)
         
-        # Optional parameters
+        # Extract optional parameters
         a_earth = data.get('a_earth', 6378137.0)
         b_earth = data.get('b_earth', 6356752.3142)
         
-        # Validate inputs
+        # Validate required inputs
         if not all([initial_time_utc, initial_position, velocity]):
             return jsonify({"error": "Missing required parameters"}), 400
             
         if len(initial_position) != 3 or len(velocity) != 3:
             return jsonify({"error": "Position and velocity must be 3D vectors"}), 400
         
-        # Generate tracking data
+        # Initialize tracking data array
         initial_time = datetime.strptime(initial_time_utc, "%Y-%m-%d %H:%M:%S")
         tracking_data = []
         
-        # Add the initial position as the first point
+        # Add initial position as first point
         tracking_data.append({
             "time_utc": initial_time_utc,
             "position": {
@@ -251,10 +269,12 @@ def track_over_time():
             }
         })
         
+        # Calculate positions at regular intervals
         for i in range(interval_hours, int(duration_days * 24), interval_hours):
             current_time = initial_time + timedelta(hours=i)
             current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
             
+            # Calculate position at current time
             position = predict_satellite_position(
                 initial_time_utc,
                 initial_position,
@@ -264,7 +284,7 @@ def track_over_time():
                 b_earth
             )
             
-            # Convert numpy values to Python native types to ensure JSON serialization
+            # Add position to tracking data
             tracking_data.append({
                 "time_utc": current_time_str,
                 "position": {
@@ -274,6 +294,7 @@ def track_over_time():
                 }
             })
         
+        # Return tracking results
         return jsonify({
             "satellite_track": tracking_data,
             "initial_time_utc": initial_time_utc,
@@ -282,11 +303,14 @@ def track_over_time():
         })
         
     except Exception as e:
+        # Return error if anything goes wrong
         return jsonify({"error": str(e)}), 500
 
+# Define route for home page
 @app.route('/', methods=['GET'])
 def home():
     """Render the API documentation page."""
+    # Return HTML template with API documentation
     return render_template_string("""
     <!DOCTYPE html>
     <html lang="en">
@@ -541,5 +565,6 @@ def home():
     </html>
     """)
 
+# Run the Flask application if this file is run directly
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8080)
