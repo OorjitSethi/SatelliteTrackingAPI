@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template_string
 from datetime import datetime, timedelta
 import numpy as np
+import math
 
 app = Flask(__name__)
 
@@ -57,9 +58,9 @@ def predict():
         # Return as JSON
         return jsonify({
             "final_position": {
-                "x": final_position[0],
-                "y": final_position[1],
-                "z": final_position[2]
+                "x": float(final_position[0]),
+                "y": float(final_position[1]),
+                "z": float(final_position[2])
             },
             "initial_time_utc": initial_time_utc,
             "final_time_utc": final_time_utc
@@ -88,8 +89,8 @@ def predict_satellite_position(initial_time_utc, initial_position, velocity, fin
     final_time = datetime.strptime(final_time_utc, "%Y-%m-%d %H:%M:%S")
     time_difference = (final_time - initial_time).total_seconds()
     
-    initial_position = np.array(initial_position)
-    velocity = np.array(velocity)
+    initial_position = np.array(initial_position, dtype=float)
+    velocity = np.array(velocity, dtype=float)
     
     r = np.linalg.norm(initial_position)
     v = np.linalg.norm(velocity)
@@ -100,26 +101,96 @@ def predict_satellite_position(initial_time_utc, initial_position, velocity, fin
     e_vec = np.cross(velocity, h) / mu - initial_position / r
     e = np.linalg.norm(e_vec)
     
-    n = np.sqrt(mu / (r ** 3))
+    # Check if e is too close to 1 to avoid numerical issues
+    if abs(e - 1.0) < 1e-10:
+        e = 0.999999
+    
+    # Calculate semi-major axis
+    a = r / (1 - e * np.dot(e_vec, initial_position) / (e * r))
+    
+    # Check if semi-major axis is valid
+    if a <= 0:
+        # Use simple propagation for hyperbolic/parabolic orbits
+        final_position = initial_position + velocity * time_difference
+        return tuple(final_position)
+    
+    n = np.sqrt(mu / (a ** 3))
     M = n * time_difference
     
-    E = M
-    for i in range(10):
-        E = E - (E - e * np.sin(E) - M) / (1 - e * np.cos(E))
+    # Solve Kepler's equation with better convergence handling
+    if e < 0.8:
+        # For low eccentricity, use standard iteration
+        E = M
+        for i in range(20):  # Increased max iterations
+            delta = (E - e * np.sin(E) - M) / (1 - e * np.cos(E))
+            E = E - delta
+            if abs(delta) < 1e-10:
+                break
+    else:
+        # For high eccentricity, use a different initial guess
+        E = math.pi if M > math.pi else M
+        for i in range(20):
+            delta = (E - e * np.sin(E) - M) / (1 - e * np.cos(E))
+            E = E - delta
+            if abs(delta) < 1e-10:
+                break
     
-    nu = 2 * np.arctan(np.sqrt((1 + e)/(1 - e)) * np.tan(E/2))
+    # Calculate true anomaly
+    cos_E = np.cos(E)
+    sin_E = np.sin(E)
+    cos_nu = (cos_E - e) / (1 - e * cos_E)
+    sin_nu = (np.sqrt(1 - e*e) * sin_E) / (1 - e * cos_E)
+    nu = np.arctan2(sin_nu, cos_nu)
     
-    r_new = r * (1 + e * np.cos(nu))
+    # Calculate new radius
+    r_new = a * (1 - e * cos_E)
     
+    # Calculate position in orbital plane
+    p = a * (1 - e*e)
+    
+    # Ensure h is not zero to avoid division by zero
+    h_mag = np.linalg.norm(h)
+    if h_mag < 1e-10:
+        # If angular momentum is too small, use simple propagation
+        final_position = initial_position + velocity * time_difference
+        return tuple(final_position)
+    
+    # Unit vectors
+    h_unit = h / h_mag
+    e_unit = e_vec / max(np.linalg.norm(e_vec), 1e-10)
+    n_unit = np.cross([0, 0, 1], h_unit)
+    n_mag = np.linalg.norm(n_unit)
+    
+    if n_mag < 1e-10:
+        # If orbit is equatorial, use a different reference
+        n_unit = np.array([1, 0, 0])
+    else:
+        n_unit = n_unit / n_mag
+    
+    # Third unit vector to complete the orthogonal set
+    m_unit = np.cross(h_unit, n_unit)
+    
+    # Position in orbital plane
+    x_orb = r_new * cos_nu
+    y_orb = r_new * sin_nu
+    
+    # Transform to inertial frame
+    pos_vec = x_orb * n_unit + y_orb * m_unit
+    
+    # Apply J2 perturbation
     f = (a_earth - b_earth) / a_earth
     J2 = 1.08263e-3
     
     perturbation = np.zeros(3)
-    perturbation[0] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (1 - 5*(initial_position[2]/r_new)**2) * initial_position[0]/r_new
-    perturbation[1] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (1 - 5*(initial_position[2]/r_new)**2) * initial_position[1]/r_new
-    perturbation[2] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (3 - 5*(initial_position[2]/r_new)**2) * initial_position[2]/r_new
+    perturbation[0] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (1 - 5*(pos_vec[2]/r_new)**2) * pos_vec[0]/r_new
+    perturbation[1] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (1 - 5*(pos_vec[2]/r_new)**2) * pos_vec[1]/r_new
+    perturbation[2] = -1.5 * J2 * (mu/r_new**2) * (a_earth/r_new)**2 * (3 - 5*(pos_vec[2]/r_new)**2) * pos_vec[2]/r_new
     
-    final_position = initial_position + velocity * time_difference + 0.5 * perturbation * time_difference**2
+    # For very long time differences, fall back to simpler model
+    if abs(time_difference) > 30 * 24 * 3600:  # More than 30 days
+        final_position = initial_position + velocity * time_difference
+    else:
+        final_position = pos_vec + 0.5 * perturbation * time_difference**2
     
     return tuple(final_position)
 
