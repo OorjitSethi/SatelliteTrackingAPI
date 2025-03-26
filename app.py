@@ -170,7 +170,17 @@ def track_over_time():
         initial_time = datetime.strptime(initial_time_utc, "%Y-%m-%d %H:%M:%S")
         tracking_data = []
         
-        for i in range(0, int(duration_days * 24), interval_hours):
+        # Add the initial position as the first point
+        tracking_data.append({
+            "time_utc": initial_time_utc,
+            "position": {
+                "x": float(initial_position[0]),
+                "y": float(initial_position[1]),
+                "z": float(initial_position[2])
+            }
+        })
+        
+        for i in range(interval_hours, int(duration_days * 24), interval_hours):
             current_time = initial_time + timedelta(hours=i)
             current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
             
@@ -183,12 +193,13 @@ def track_over_time():
                 b_earth
             )
             
+            # Convert numpy values to Python native types to ensure JSON serialization
             tracking_data.append({
                 "time_utc": current_time_str,
                 "position": {
-                    "x": position[0],
-                    "y": position[1],
-                    "z": position[2]
+                    "x": float(position[0]),
+                    "y": float(position[1]),
+                    "z": float(position[2])
                 }
             })
         
